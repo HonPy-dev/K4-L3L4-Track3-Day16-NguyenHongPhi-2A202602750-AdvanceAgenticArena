@@ -73,22 +73,93 @@ from __future__ import annotations
 from harness.middleware import Middleware
 
 
+#: Liên từ bản thân mô hình dùng để dán hai nửa câu vào nhau (xem docstring).
+FUSED_JOINT = " và "
+
+#: Câu trả lời thay cho "answer" khi không còn claim nào đỡ được.
+ABSTAIN_ANSWER = (
+    "Không đủ căn cứ để trả lời: không có khẳng định nào trong báo cáo "
+    "được hỗ trợ bởi tài liệu mà agent đã thực sự đọc."
+)
+
+
 class Critic(Middleware):
     """Xoá những gì bằng chứng không đỡ; abstain khi không còn gì."""
 
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list):
+            return report
+        observed = ctx.observed_text
+        readable = [
+            doc
+            for doc in (getattr(ctx.corpus, "docs", None) or [])
+            if isinstance(getattr(doc, "body", None), str) and doc.body in observed
+        ]
+        split_any = False
+        kept = []
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text")
+            if isinstance(text, str) and text and text in observed:
+                kept.append(claim)
+                continue
+            halves = self._split_fused(text, observed, readable)
+            if halves is not None:
+                kept.extend(halves)
+                split_any = True
+
+        if not kept:
+            if claims:
+                report["abstain"] = True
+                report["claims"] = []
+                report["citations"] = []
+                report["answer"] = ABSTAIN_ANSWER
+            return report
+
+        report["claims"] = kept
+        if split_any:
+            report["abstain"] = True
+        report["citations"] = sorted(
+            {c["doc_id"] for c in kept if isinstance(c.get("doc_id"), str)}
+        )
+        return report
+
+    def _split_fused(self, text, observed, readable):
+        """Tách câu ghép hai nửa của hai tài liệu mâu thuẫn thành hai claim.
+
+        Hai nửa phải cùng xuất hiện nguyên văn trong bằng chứng đã đọc và
+        thuộc hai tài liệu khác nhau; cắt sai thì trả None để claim bị xoá.
+        """
+        if not isinstance(text, str):
+            return None
+        start = 0
+        while True:
+            joint = text.find(FUSED_JOINT, start)
+            if joint == -1:
+                return None
+            left, right = text[:joint], text[joint + len(FUSED_JOINT):]
+            if left in observed and right in observed:
+                left_doc = _doc_containing(left, readable)
+                right_doc = _doc_containing(right, readable)
+                if (
+                    left_doc is not None
+                    and right_doc is not None
+                    and left_doc.doc_id != right_doc.doc_id
+                ):
+                    return [
+                        {"text": left, "doc_id": left_doc.doc_id},
+                        {"text": right, "doc_id": right_doc.doc_id},
+                    ]
+            start = joint + 1
+
+
+def _doc_containing(text, readable):
+    """Tài liệu đầu tiên trong `readable` có MỘT dòng chứa nguyên văn text."""
+    for doc in readable:
+        if any(text in line for line in doc.body.splitlines()):
+            return doc
+    return None

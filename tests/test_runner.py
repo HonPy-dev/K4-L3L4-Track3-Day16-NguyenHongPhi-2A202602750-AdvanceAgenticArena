@@ -667,6 +667,15 @@ def test_a_gigantic_model_output_still_yields_a_scoreable_run():
         ("many real finals", "\n".join(['FINAL: {"answer": "a", "claims": []}'] * 5_000)),
         ("deep brackets", "FINAL: " + "[" * 2_000 + "]" * 2_000),
     ],
+    # Windows cannot put a >32KB test id into PYTEST_CURRENT_TEST, and the
+    # default ids embed the full `text`. Name each case instead.
+    ids=[
+        "pseudo-marker-prose",
+        "pseudo-marker-braces",
+        "megabyte-of-junk",
+        "many-real-finals",
+        "deep-brackets",
+    ],
 )
 def test_normalisation_is_bounded_on_pathological_output(name, text):
     """A per-turn cost, so it must stay milliseconds even on hostile
@@ -1309,8 +1318,12 @@ def test_a_score_file_tagged_baseline_is_used_as_the_baseline(tmp_path):
     assert payload["baseline_source"].startswith("file tự khai baseline")
     rows = {row["entry_id"]: row for row in payload["entries"]}
     assert set(rows) == {"blind", "team"}
+    # `leaderboard.py` rounds the gap from the UNROUNDED totals while the
+    # JSON fields are rounded independently, so the gap may differ from
+    # (rounded mean - rounded baseline) by up to one cent plus float
+    # epsilon — exactly 0.01 is a legal outcome, not a mismatch.
     assert rows["team"]["gap"] == pytest.approx(
-        rows["team"]["mean_total"] - payload["baseline_total"], abs=0.01
+        rows["team"]["mean_total"] - payload["baseline_total"], abs=0.011
     )
 
 
